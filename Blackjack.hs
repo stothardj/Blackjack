@@ -48,6 +48,7 @@ prompt msg = do
   hFlush stdout
   getLine
 
+getValidChoice :: String -> [String] -> IO String
 getValidChoice msg options =
   iterateUntil p x
   where
@@ -55,11 +56,13 @@ getValidChoice msg options =
     p = (`elem` options)
 
 -- Apparently I should avoid I shouldn't be taking the length when unnecessary?
+lengthIs :: Num a => [t] -> a -> Bool
 lengthIs [] 0 = True
 lengthIs _ 0 = False
 lengthIs [] _ = False
 lengthIs (x:xs) l = lengthIs xs (l-1)
 
+count :: (a -> Bool) -> [a] -> Int
 count p = length . filter p
 
 -- Black Jack card values.. Ace is 11 unless changed down
@@ -98,39 +101,45 @@ drawCard player card =
 dealOutCards :: [CardPlayer] -> Deck -> [CardPlayer]
 dealOutCards = zipWith drawCard
 
+readableList :: Show a => [a] -> String
 readableList [] = "empty"
 readableList [x] = show x
 readableList (x:xs) =
   show x ++ concatMap ((',':) . (' ':) . show) (init xs) ++ " and " ++ show (last xs)
 
+getHand :: CardPlayer -> Hand
 getHand player =
   case currentHand player of
     FirstHand -> hand player
     _ -> splitHand player
 
+getPlayerNames :: IO [String]
 getPlayerNames =
   f `untilM` p
   where
     f = prompt "Enter the player's name: "
     p = (=="n") `liftM` getValidChoice "Any more players? (y/n): " ["y","n"]
 
+takeBet :: CardPlayer -> IO Int
 takeBet player =
   iterateUntil p x
   where
     x = (read `liftM` prompt ("How much would you like to bet " ++ name player ++ "? ")) :: IO Int
     p bet = bet >= 0 && bet <= money player
 
+turnAction :: CardPlayer -> Deck -> String -> (CardPlayer, Deck)
 turnAction player deck "hit" = ( drawCard player (head deck), tail deck )
 turnAction player deck "stay" = ( player, deck )
 turnAction player deck "double down" = ( np, tail deck )
   where
     p = drawCard player (head deck)
     -- Note if bet is 0 then p = np
-    np = p { bet=(2 * bet p) }
+    np = p { bet=2 * bet p }
 turnAction player deck "split" = ( np, drop 2 deck )
   where
-    np = player { hand=(head deck):(drop 1 $ hand player), splitHand=[(head $ hand player),(deck !! 2)] }
+    np = player { hand=head deck:drop 1 (hand player), splitHand=[head $ hand player,deck !! 2] }
 
+showMove :: String -> CardPlayer -> String
 showMove choice player
   | choice == "stay" = name player ++ " stays with a total of " ++ show playerHandWorth
   | choice == "hit" && playerHandWorth > 21 = name player ++ " drew a " ++ show mostRecentCard ++ " and went Bust"
@@ -142,6 +151,7 @@ showMove choice player
     mostRecentCard = head playerHand
     playerHandWorth = handWorth playerHand
 
+endMove :: String -> CardPlayer -> Deck -> IO (CardPlayer, Deck)
 endMove choice player deck
   | stopping && FirstHand == currentHand player && not (null (splitHand player)) =
     takeTurn (player { currentHand = SplitHand } ) deck
@@ -150,6 +160,7 @@ endMove choice player deck
   where
     stopping = choice == "stay" || choice == "double down" || handWorth (getHand player) >= 21
                
+takeTurn :: CardPlayer -> Deck -> IO (CardPlayer, Deck)
 takeTurn player deck = do
   putStrLn $ "You have a " ++ readableList playerHand ++ "."
   putStrLn $ "This totals to " ++ show playerHandWorth ++ "."
@@ -172,15 +183,33 @@ takeTurn player deck = do
                  ]
     availableOptions = map snd $ filter fst allOptions
 
-takeTurnsHelper accum (p:players) deck = do
+takeTurns' ::  [CardPlayer] -> [CardPlayer] -> Deck -> IO ([CardPlayer], Deck)
+takeTurns' accum (p:players) deck = do
   putStrLn $ "It is your turn " ++ name p ++ "."
   (p', deck') <- takeTurn p deck
-  takeTurnsHelper (p':accum) players deck'
-takeTurnsHelper accum [] deck = return accum
+  takeTurns' (p':accum) players deck'
+takeTurns' accum [] deck = return (accum, deck)
 
-takeTurns = takeTurnsHelper []  
+takeTurns ::  [CardPlayer] -> Deck -> IO ([CardPlayer], Deck)
+takeTurns = takeTurns' []
 
 startingMoney = 100
+
+dealerTurn' hand (c:deck)
+  | worth > 21 = putStrLn "The dealer bust!"
+  | worth >= 17 = putStrLn "The dealer stays"
+  | otherwise = do
+    putStrLn "The dealer hits"
+    putStrLn $ "He draws a " ++ show c ++ " bringing him to a total of " ++ show (handWorth (c:hand))
+    dealerTurn' (c:hand) deck
+  where
+    worth = handWorth hand
+
+dealerTurn dealer deck = do
+  putStrLn $ "The dealer has a " ++ readableList dealerHand ++ "."
+  dealerTurn' dealerHand deck
+    where
+      dealerHand = hand dealer
 
 setupGame = do
   names <- getPlayerNames
@@ -189,17 +218,17 @@ setupGame = do
 
 playGame names shuffled = do
   putStrLn $ "Each player starts with " ++ show startingMoney ++ " dollars"
-  bets <- mapM takeBet players''
-  let players''' = zipWith (\p b->p { bet=b }) players'' bets
-  putStrLn $ "The dealer has a " ++ show (head $ hand $ head players') ++ " face up."
-  let deck = (drop (2 * length players) shuffled)
-  takeTurns players''' deck
-
+  bets <- mapM takeBet players
+  let players' = zipWith (\p b->p { bet=b }) players bets
+  putStrLn $ "The dealer has a " ++ show (head $ hand dealer) ++ " face up."
+  (players'', deck') <- takeTurns players' deck
+  dealerTurn dealer deck'
+  putStrLn "Done!"
   where
     defaultPlayer n = CardPlayer { name=n, hand=[], splitHand=[], currentHand=FirstHand, money=startingMoney, bet=0 }
-    players = map defaultPlayer ("Dealer":names)
-    players' = players `dealOutCards` shuffled `dealOutCards` drop (length players) shuffled
-    players'' = reverse $ tail players'
+    numPlayers = 1 + length names
+    dealer:players = map defaultPlayer ("Dealer":names) `dealOutCards` shuffled `dealOutCards` drop numPlayers shuffled
+    deck = drop (2 * numPlayers) shuffled
     
 main = do
   putStrLn " -- Black Jack -- "
