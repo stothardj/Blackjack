@@ -195,42 +195,77 @@ takeTurns = takeTurns' []
 
 startingMoney = 100
 
-dealerTurn' hand (c:deck)
-  | worth > 21 = putStrLn "The dealer bust!"
-  | worth >= 17 = putStrLn "The dealer stays"
+dealerTurn' :: Hand -> Deck -> IO Hand
+dealerTurn' dhand (c:deck)
+  | worth > 21 = putStrLn "The dealer bust!" >> return dhand
+  | worth >= 17 = putStrLn "The dealer stays" >> return dhand
   | otherwise = do
     putStrLn "The dealer hits"
-    putStrLn $ "He draws a " ++ show c ++ " bringing him to a total of " ++ show (handWorth (c:hand))
-    dealerTurn' (c:hand) deck
+    putStrLn $ "He draws a " ++ show c ++ " bringing him to a total of " ++ show (handWorth (c:dhand))
+    dealerTurn' (c:dhand) deck
   where
-    worth = handWorth hand
+    worth = handWorth dhand
 
+dealerTurn :: CardPlayer -> [Card] -> IO Hand
 dealerTurn dealer deck = do
   putStrLn $ "The dealer has a " ++ readableList dealerHand ++ "."
   dealerTurn' dealerHand deck
     where
       dealerHand = hand dealer
 
-setupGame = do
-  names <- getPlayerNames
-  shuffled <- createShuffledDeck
-  return (names, shuffled)
+payout' dhand phand pbet
+  | pworth > 21 = -pbet
+  | dworth > 21 = pbet
+  | pworth > dworth = pbet
+  | pworth < dworth = -pbet
+  | otherwise = 0
+  where
+    dworth = handWorth dhand
+    pworth = handWorth phand
 
-playGame names shuffled = do
-  putStrLn $ "Each player starts with " ++ show startingMoney ++ " dollars"
+describePayout p
+  | p > 0 = " won " ++ show p
+  | p < 0 = " lost " ++ show (-p)
+  | otherwise = " pushed"
+
+dhand `payout` player = do
+  putStr $ name player ++ describePayout pay
+  if null (splitHand player)
+    then putStrLn "" >> return player { money=pay + money player }
+    else do
+    putStrLn $ " and with their split hand" ++ describePayout spay
+    return player { money=pay + spay + money player }
+  where
+    pay = payout' dhand (hand player) pbet
+    spay = payout' dhand (splitHand player) pbet
+    pbet = bet player
+
+gameIteration d ps shuffled = do
+  mapM (\p -> putStrLn $ name p ++ " has " ++ show (money p) ++ " dollars") players
   bets <- mapM takeBet players
   let players' = zipWith (\p b->p { bet=b }) players bets
   putStrLn $ "The dealer has a " ++ show (head $ hand dealer) ++ " face up."
   (players'', deck') <- takeTurns players' deck
-  dealerTurn dealer deck'
-  putStrLn "Done!"
+  dhand <- dealerTurn dealer deck'
+  mapM (dhand `payout`) players''
+  where
+    numPlayers = length (d:ps)
+    deck = drop (2 * numPlayers) shuffled
+    dealer:players = (d:ps) `dealOutCards` shuffled `dealOutCards` drop numPlayers shuffled    
+    
+createPlayers names =
+  return (map defaultPlayer ("Dealer":names))
   where
     defaultPlayer n = CardPlayer { name=n, hand=[], splitHand=[], currentHand=FirstHand, money=startingMoney, bet=0 }
-    numPlayers = 1 + length names
-    dealer:players = map defaultPlayer ("Dealer":names) `dealOutCards` shuffled `dealOutCards` drop numPlayers shuffled
-    deck = drop (2 * numPlayers) shuffled
-    
+  
+gameLoop (dealer:players) = do
+  np <- f
+  done <- p
+  unless done (gameLoop (dealer:np))
+  where
+    f = createShuffledDeck >>= (gameIteration dealer players)
+    p = (=="n") `liftM` getValidChoice "Play again? (y/n): " ["y","n"]
+
 main = do
   putStrLn " -- Black Jack -- "
-  (n, s) <- setupGame
-  playGame n s
+  getPlayerNames >>= createPlayers >>= gameLoop
